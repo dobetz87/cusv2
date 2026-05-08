@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { CheckCircle2, Clock, MapPin, Navigation, Truck, MessageCircle } from "lucide-react";
+import { CheckCircle2, Clock, MapPin, Navigation, Truck, MessageCircle, Star } from "lucide-react";
 import { ORDER_STATUS_LABELS, ORDER_STATUS_COLORS, fmtRp, fmtDate } from "@/lib/constants";
 
 interface OrderTrackerProps {
