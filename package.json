@@ -1,0 +1,9 @@
+{
+  "name": "cus-otw",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cus — PWA e-commerce prototype for local delivery in Pujon",
+  "scripts": {
+    "dev": "npx -y serve src -l 5173 --cors --no-clipboard"
+  }
+}

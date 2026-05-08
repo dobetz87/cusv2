@@ -1,0 +1,338 @@
+
+
+### ASSISTANT
+# 📄 PRD FULLSTACK: "CUS" (Phase 1 MVP)
+**Optimized for Claude Code Execution** | `v1.0` | `$0 Budget` | `Next.js + Supabase + Vercel`
+
+---
+
+## 🎯 1. PRODUCT OVERVIEW & CONSTRAINTS
+| Parameter | Specification |
+|-----------|---------------|
+| **Nama Produk** | Cus |
+| **Visi** | Sistem operasi digital jasa titip harian hyperlocal (Pujon/Malang) |
+| **Stack** | Next.js 14+ App Router, Tailwind CSS, shadcn/ui, Supabase (Auth, DB, Storage, Realtime), Vercel |
+| **Budget** | `$0` (Semua menggunakan free tier) |
+| **Scope Phase 1** | PWA User + Admin Dashboard + WA Manual Dispatch (Driver/Merchant) |
+| **Core Moat** | `ORDER CEPAT` (free-text multi-stop) + Visual Feed "Lagi Rame" |
+| **Out of Scope** | Live map, real WA API, AI parser, rating system, dynamic pricing, offline PWA |
+
+---
+
+## 🗺️ 2. FILE & FOLDER ARCHITECTURE
+```
+cus-app/
+├── app/
+│   ├── (user)/                # PWA Routes
+│   │   ├── layout.tsx         # PWA shell + manifest
+│   │   ├── page.tsx           # Gateway: Pilih "Pemesan" / "Driver"
+│   │   ├── auth/page.tsx      # WA OTP / Phone Verify
+│   │   ├── home/page.tsx      # Feed "Lagi Rame" + ORDER CEPAT
+│   │   ├── cart/page.tsx      # Multi-stop cart
+│   │   └── order/[id]/page.tsx # Tracking
+│   ├── (admin)/               # Dashboard Routes
+│   │   ├── layout.tsx
+│   │   ├── page.tsx           # Order Queue Overview
+│   │   ├── orders/page.tsx    # Detail + Dispatch
+│   │   ├── drivers/page.tsx   # Driver list + status
+│   │   └── merchants/page.tsx # Merchant catalog
+│   └── api/                   # Edge functions (if needed)
+├── components/
+│   ├── ui/                    # shadcn primitives
+│   ├── auth/
+│   ├── user/
+│   ├── admin/
+│   └── shared/
+├── lib/
+│   ├── supabase.ts            # Client + Server clients
+│   ├── constants.ts           # Pricing, keywords, status enums
+│   └── utils.ts
+├── public/                    # manifest.json, icons, placeholder images
+├── supabase/
+│   └── migrations/            # SQL schema
+└── .env.local                 # SUPABASE_URL, SUPABASE_ANON_KEY
+```
+
+---
+
+## 🗄️ 3. SUPABASE DATABASE SCHEMA (Phase 1)
+```sql
+-- profiles (extends auth.users)
+CREATE TABLE profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id),
+  phone TEXT UNIQUE NOT NULL,
+  role TEXT CHECK (role IN ('user', 'driver', 'admin')) DEFAULT 'user',
+  full_name TEXT,
+  trust_score INT DEFAULT 50,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- drivers
+CREATE TABLE drivers (
+  id UUID PRIMARY KEY REFERENCES profiles(id),
+  status TEXT CHECK (status IN ('pending', 'active', 'suspended')) DEFAULT 'pending',
+  current_lat DECIMAL(10,8),
+  current_lng DECIMAL(10,8),
+  wallet_balance NUMERIC(10,2) DEFAULT 0.00,
+  verified_at TIMESTAMPTZ
+);
+
+-- merchants
+CREATE TABLE merchants (
+  id UUID PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  name TEXT NOT NULL,
+  category TEXT CHECK (category IN ('food', 'laundry', 'retail', 'pharmacy')),
+  address TEXT NOT NULL,
+  contact_wa TEXT,
+  operating_hours JSONB,
+  is_active BOOLEAN DEFAULT TRUE
+);
+
+-- feed_posts
+CREATE TABLE feed_posts (
+  id UUID PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  merchant_id INT REFERENCES merchants(id),
+  image_url TEXT NOT NULL,
+  caption TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- orders
+CREATE TABLE orders (
+  id UUID PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  user_id UUID REFERENCES profiles(id),
+  status TEXT CHECK (status IN ('pending', 'accepted', 'picked_up', 'en_route', 'completed', 'cancelled')),
+  total_fee NUMERIC(10,2),
+  platform_fee NUMERIC(10,2),
+  driver_id UUID REFERENCES drivers(id),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- order_stops (multi-stop core)
+CREATE TABLE order_stops (
+  id UUID PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  order_id UUID REFERENCES orders(id),
+  stop_index INT NOT NULL,
+  merchant_id INT REFERENCES merchants(id),
+  address TEXT NOT NULL,
+  notes TEXT,
+  status TEXT CHECK (status IN ('pending', 'picked_up', 'delivered', 'failed')) DEFAULT 'pending'
+);
+
+-- order_items
+CREATE TABLE order_items (
+  id UUID PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  stop_id INT REFERENCES order_stops(id),
+  item_name TEXT NOT NULL,
+  qty INT DEFAULT 1,
+  price_estimate NUMERIC(10,2),
+  variant JSONB -- e.g., {"size": "M", "spicy": 2}
+);
+
+-- payments
+CREATE TABLE payments (
+  id UUID PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  order_id UUID REFERENCES orders(id),
+  method TEXT CHECK (method IN ('cod', 'qris')),
+  amount NUMERIC(10,2),
+  status TEXT CHECK (status IN ('pending', 'paid', 'refunded')),
+  paid_at TIMESTAMPTZ
+);
+
+-- RLS Policies (Basic)
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public profiles are viewable by everyone" ON profiles FOR SELECT USING (true);
+CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
+-- (Add similar RLS for drivers, merchants, orders, etc. matching role logic)
+```
+
+---
+
+## 👤 4. USER PWA FEATURES
+
+### 4.1 Gateway & WA OTP
+- **User Story**: Sebagai user baru, saya ingin login cepat via nomor WA agar bisa langsung pesan tanpa ribet daftar email.
+- **Acceptance Criteria**:
+  - Given user membuka `/` → Then tampil 2 tombol: "Pesan Sekarang" & "Daftar Jadi Driver"
+  - When user klik "Pesan" → Then redirect ke `/auth` + input phone
+  - When submit → Then simpan ke `profiles` (role: user, verified: false)
+  - When admin verifikasi di dashboard → Then `is_verified = true` + redirect ke `/home`
+- **Technical Task**: `app/(user)/auth/page.tsx`, `lib/supabase.ts`, `components/auth/PhoneForm.tsx`
+
+### 4.2 Home Feed + ORDER CEPAT
+- **User Story**: Sebagai user, saya ingin scroll feed "Lagi Rame" untuk terinspirasi, atau langsung ketik order kompleks di `ORDER CEPAT`.
+- **Acceptance Criteria**:
+  - Given `/home` → Then fetch `feed_posts` join `merchants`
+  - When user ketik di `ORDER CEPAT` textarea → Then parse ke structured cart (Phase 1: simpan sebagai raw text + auto-add dummy stop)
+  - When user scroll → Then infinite load feed images
+- **Technical Task**: `app/(user)/home/page.tsx`, `components/user/OrderCepatInput.tsx`, `components/user/FeedCard.tsx`
+
+### 4.3 Multi-Stop Cart & Checkout
+- **User Story**: Sebagai user, saya ingin tambah beberapa merchant dalam 1 order dan lihat estimasi ongkir transparan.
+- **Acceptance Criteria**:
+  - Given cart → Then hitung: `Rp 8.000 + (stop_count - 1) * Rp 2.000`
+  - When checkout → Then create `order` + `order_stops` + `order_items` → redirect `/order/[id]`
+  - Given payment method → Then COD default, QRIS opsional
+- **Technical Task**: `app/(user)/cart/page.tsx`, `lib/constants.ts` (pricing logic), `components/user/CheckoutSummary.tsx`
+
+### 4.4 Order Tracking
+- **User Story**: Sebagai user, saya ingin tahu status order real-time tanpa live map.
+- **Acceptance Criteria**:
+  - Given `/order/[id]` → Then subscribe Supabase Realtime to `orders.status`
+  - When status change → Then update UI: `Menunggu driver` → `Diambil` → `Dalam perjalanan` → `Selesai`
+  - When `completed` → Then show QRIS/COD confirmation note
+- **Technical Task**: `app/(user)/order/[id]/page.tsx`, `components/user/OrderStatusBadge.tsx`
+
+---
+
+## 🛠️ 5. ADMIN DASHBOARD FEATURES
+
+### 5.1 Order Queue & Dispatch
+- **User Story**: Sebagai admin, saya ingin melihat antrian order, assign driver terdekat, dan monitor status.
+- **Acceptance Criteria**:
+  - Given `/admin/orders` → Then list orders with status filter
+  - When click order → Then show detail + driver dropdown (filter by `status = 'active'`)
+  - When assign → Then update `orders.driver_id` + `status = 'accepted'`
+- **Technical Task**: `app/(admin)/orders/page.tsx`, `components/admin/OrderQueueTable.tsx`
+
+### 5.2 Quick Order Builder / Parser
+- **User Story**: Sebagai admin, saya ingin parse ORDER CEPAT manual menjadi structured stops & items.
+- **Acceptance Criteria**:
+  - Given raw text input → Then admin split manually into stops/items UI
+  - When save → Then insert to `order_stops` & `order_items`
+  - Then auto-calculate `total_fee` based on pricing rules
+- **Technical Task**: `components/admin/OrderParser.tsx`, `lib/constants.ts`
+
+### 5.3 Driver & Merchant Management
+- **User Story**: Sebagai admin, saya ingin verifikasi driver, lihat earnings, dan manage merchant catalog.
+- **Acceptance Criteria**:
+  - Given `/admin/drivers` → Then table + "Verify" / "Suspend" actions
+  - Given `/admin/merchants` → Then CRUD + toggle `is_active`
+- **Technical Task**: `app/(admin)/drivers/page.tsx`, `app/(admin)/merchants/page.tsx`
+
+---
+
+## 🛵 6. DRIVER & MERCHANT WA FLOWS (Phase 1 Manual)
+
+| Role | Flow | Message Template | Tracking |
+|------|------|------------------|----------|
+| **Driver** | Admin forward order via WA Web | `[ORDER BARU] 📍Ambil: [alamat] 🛒[item] 💰Fee: Rp 6.000. Balas "YA" accept, "TOLAK" reject` | Admin update `orders.status` & `driver_id` di dashboard |
+| **Driver** | Konfirmasi task | Reply: `"AMBIL"`, `"ANTAR"`, `"SELESAI"` | Admin klik status badge di dashboard |
+| **Merchant** | Order forwarded | `"Halo [Nama], ada order: [item] qty [x]. Konfirmasi stok tersedia?"` | Merchant reply → admin input availability di dashboard |
+| **Payout** | Weekly summary | `"📊 Minggu ini: [x] order, Total Fee: Rp [amount]. Transfer ke rekening [xxx]?"` | Manual transfer, catat di `drivers.wallet_balance` |
+
+> 💡 **AI Note**: Phase 1 tidak pakai WA API. Semua log WA disimulasikan via dashboard notes. Phase 2 ganti dengan Evolution API / Baileys.
+
+---
+
+## 🔌 7. API & REALTIME CONTRACTS
+
+### Supabase Realtime Channels
+```ts
+// Client-side subscription (components/user/OrderStatusBadge.tsx)
+const channel = supabase
+  .channel('order-status')
+  .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders', filter: `id=eq.${orderId}` }, (payload) => {
+    setStatus(payload.new.status);
+  })
+  .subscribe();
+```
+
+### Pricing Logic (lib/constants.ts)
+```ts
+export const PRICING = {
+  baseOngkir: 8000,
+  stopFee: 2000,
+  platformFee: 2000,
+  driverShare: 6000,
+  calculate: (stops: number) => {
+    const ongkir = PRICING.baseOngkir + Math.max(0, stops - 1) * PRICING.stopFee;
+    return { ongkir, platformFee: PRICING.platformFee, total: ongkir + PRICING.platformFee };
+  }
+};
+```
+
+---
+
+## 🚀 8. IMPLEMENTATION PHASES & AI PROMPTS (Copy-Paste Ready)
+
+### 🟢 Phase 1: Project Scaffold + DB + Auth
+```
+Prompt for Claude Code:
+"Buat project Next.js 14 App Router dengan Tailwind + shadcn. Setup Supabase client/server di lib/supabase.ts. 
+Terapkan schema SQL yang ada di PRD section 3. 
+Buat halaman /auth dengan form input phone, simpan ke tabel profiles (role='user', verified=false). 
+Gunakan mock verify button di dashboard untuk toggle is_verified. 
+Pastikan RLS aktif. Output: file tree + code untuk setiap file."
+```
+
+### 🟡 Phase 2: User PWA Core
+```
+Prompt:
+"Buat layout PWA di app/(user)/layout.tsx dengan manifest & viewport. 
+Buat /home dengan feed grid (fetch feed_posts join merchants) + ORDER CEPAT textarea. 
+Implementasikan cart multi-stop dengan pricing logic dari lib/constants.ts. 
+Buat checkout yang insert ke orders, order_stops, order_items. 
+Gunakan shadcn components (Card, Input, Button, Dialog). 
+Output: full component code + Supabase insert queries."
+```
+
+### 🟠 Phase 3: Admin Dashboard + Dispatch
+```
+Prompt:
+"Buat app/(admin) layout dengan sidebar. 
+Buat /admin/orders tabel dengan filter status. 
+Implementasikan dispatch dropdown yang update driver_id & status. 
+Buat OrderParser UI untuk split raw ORDER CEPAT text ke stops/items. 
+Tambahkan /admin/drivers & /admin/merchants CRUD sederhana. 
+Gunakan server actions untuk mutations. Output: complete admin flow code."
+```
+
+### 🔵 Phase 4: Realtime + Polish + Deploy
+```
+Prompt:
+"Tambahkan Supabase Realtime subscription di /order/[id] untuk update status live. 
+Implementasikan PWA caching strategy (next-pwa atau basic SW). 
+Tambahkan error boundaries, loading states, & empty states. 
+Siapkan vercel.json & supabase config untuk deploy. 
+Output: final tweaks + deploy checklist."
+```
+
+---
+
+## 📊 9. MVP SUCCESS METRICS & TESTING CHECKLIST
+
+| Metric | Target | Tracking Method |
+|--------|--------|-----------------|
+| Order/hari | ≥30 | Supabase count + admin dashboard |
+| Completion time | <45 min | `completed_at - created_at` avg |
+| Driver active/week | ≥15 | `drivers.status = 'active'` filter |
+
+### ✅ Pre-Launch Testing Checklist
+- [ ] WA OTP flow (manual verify) works end-to-end
+- [ ] Multi-stop pricing calculates correctly
+- [ ] Order status realtime updates in PWA
+- [ ] Admin can assign driver & update status
+- [ ] RLS blocks unauthorized data access
+- [ ] PWA installs on mobile (Add to Home Screen)
+- [ ] Vercel deploy + Supabase connection stable
+
+---
+
+## 🛠️ HOW TO USE THIS PRD WITH CLAUDE CODE
+1. **Copy prompt per Phase** → Paste ke Claude Code chat
+2. **Specify context**: `"Follow PRD-CUS-PHASE1.md exactly. Use Next.js 14 App Router, Supabase, shadcn."`
+3. **Iterate module-by-module**: Jangan generate semua sekaligus. Mulai Phase 1 → test → Phase 2.
+4. **Validate AC**: Setelah kode generate, cek apakah semua `Given-When-Then` terpenuhi.
+5. **Document deviations**: Jika Claude Code mengubah struktur, update PRD di bagian `lib/constants.ts` atau `supabase/migrations/`.
+
+---
+
+✅ **PRD siap di-eksekusi**. 
+Jika kamu ingin saya:
+- 🔧 Generate `supabase/migrations/001_init.sql` lengkap dengan RLS & indexes
+- 📦 Buat `package.json` + `next.config.mjs` + `tailwind.config.ts` template
+- 🎨 Generate exact shadcn install commands & component tree
+- 📱 Buat wireframe ASCII untuk 12 screen PWA + 6 screen Admin
+
+Cukup reply dengan keyword yang diinginkan. Saya akan lanjutkan secara modular agar Claude Code bisa langsung compile. 🚀
