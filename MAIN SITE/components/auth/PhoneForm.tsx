@@ -28,6 +28,9 @@ export default function PhoneForm({ onSuccess }: PhoneFormProps) {
 
     const { error: err } = await supabase.auth.signInWithOtp({
       phone: normalized,
+      options: {
+        channel: 'whatsapp',
+      },
     });
 
     setLoading(false);
